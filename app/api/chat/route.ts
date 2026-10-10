@@ -1,23 +1,19 @@
-/**
- * Final Route Handler — Step 4 of Section 4 (RAG-as-tool-call) +
- * the source metadata used by Step 5's UI.
- *
- * The model decides whether to call the getInformation tool. When it does,
- * the tool runs vector search and returns chunk text + page + score. The
- * client renders those as collapsible sources under the assistant message.
- */
 import { openai } from '@ai-sdk/openai';
-import { streamText, tool, embed } from 'ai';
-import { Index } from '@upstash/vector';
+import { streamText, tool } from 'ai';
 import { z } from 'zod';
+import { Index } from '@upstash/vector';
 
-const index = new Index();
+// Initialize Upstash Vector client
+const index = new Index({
+  url: process.env.UPSTASH_VECTOR_REST_URL!,
+  token: process.env.UPSTASH_VECTOR_REST_TOKEN!,
+});
 
 export async function POST(req: Request) {
   const { messages } = await req.json();
 
-  const result = streamText({
-model: openai('gpt-4o-mini'),
+  const result = await streamText({
+    model: openai('gpt-4o-mini'),
     system:
       'You are the official Gyeonggi-do Travel Assistant. ' +
       'Help users plan trips, discover attractions, learn local history, and find transportation options in Gyeonggi Province, South Korea. ' +
@@ -25,34 +21,31 @@ model: openai('gpt-4o-mini'),
       'Synthesize information carefully from the retrieved context. ' +
       'If the retrieved context does not contain any relevant information about the user request, state: "I do not have enough context in the Gyeonggi-do travel guide to answer that question."',
     messages,
+    maxSteps: 2, // <--- CRITICAL FIX: Allows AI SDK to auto-execute tool and stream the final answer
     tools: {
       getInformation: tool({
         description:
-          'Look up information from the official Gyeonggi-do travel guide. Use this whenever the user asks a substantive question about tourism, attractions, transportation, or history in Gyeonggi-do.',
+          'Search the Gyeonggi-do official travel guide for information on attractions, places, history, and transport.',
         parameters: z.object({
           query: z
             .string()
-            .describe('the topic, term, or sub-question to search for'),
+            .describe('The search query or keyword to look up in the vector index.'),
         }),
         execute: async ({ query }) => {
-          const { embedding } = await embed({
-            model: openai.embedding('text-embedding-3-small'),
-            value: query,
-          });
           const hits = await index.query({
-            vector: embedding,
+            data: query,
             topK: 10,
             includeMetadata: true,
           });
-          return hits.map((h) => ({
-            text: (h.metadata?.text as string) ?? '',
-            page: (h.metadata?.page as number) ?? null,
-            score: h.score,
+
+          return hits.map((hit) => ({
+            page: hit.metadata?.page || 'Unknown',
+            text: hit.metadata?.text || '',
+            score: hit.score,
           }));
         },
       }),
     },
-    maxSteps: 3,
   });
 
   return result.toDataStreamResponse();
